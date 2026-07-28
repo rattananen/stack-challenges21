@@ -119,7 +119,7 @@ struct Backtrack {
 };
 
 
-
+///https://godbolt.org/z/sxMeKT9o8
 int main() {
 	Grid result{};
 	result.data = in_board;
