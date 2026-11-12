@@ -1,0 +1,15 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "stack",
+  "version": "0.1",
+  "builtin-baseline": "e529425f2f43d773d0a59517c8d89367d68bb7fd",
+  "dependencies": [
+    "nlohmann-json"
+  ],
+  "overrides": [
+	 {
+      "name": "nlohmann-json",
+      "version": "3.12.0#2"
+    }
+  ]
+}

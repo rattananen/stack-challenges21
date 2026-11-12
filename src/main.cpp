@@ -1,559 +1,378 @@
 #include <iostream>
 #include <cstdint>
-#include <array>
 #include <format>
-#include <functional>
-#include <bit>
+#include <fstream>
 #include <vector>
+#include <array>
+#include <string_view>
+#include <algorithm>
+#include <charconv>
+#include <random>
+#include <nlohmann/json.hpp>
 
-constexpr std::array<uint16_t, 81> in_board = {
-	1,3,0,0,7,0,0,0,0,
-	6,0,0,1,9,5,0,0,0,
-	0,0,8,0,0,0,0,6,0,
-	2,0,0,0,6,0,0,0,3,
-	4,0,0,8,0,3,0,0,1,
-	7,0,0,0,0,0,0,0,0,
-	0,6,0,0,0,0,2,8,0,
-	0,0,0,4,1,9,0,0,0,
-	0,0,0,0,0,0,0,0,0,
+using namespace std::literals;
+
+constexpr std::array WORD_T_STR_MAP{
+    "unknown"sv,
+    "Adjective"sv,
+    "Adverb"sv,
+    "Noun"sv,
+    "Verb"sv,
+    "Determiner"sv,
+    "Conjunction"sv,
+    "Preposition"sv,
+    "Interjection"sv,
+    "Pronoun"sv
 };
 
-constexpr uint16_t min_sum = 19;
-
-constexpr std::array<uint16_t, 32> in_path = {
-	0, 0, 1, 0, 2, 0, 2, 1,
-	0, 8, 0, 7, 0, 6, 1, 6,
-	8, 0, 8, 1, 8, 2, 7, 2,
-	8, 8, 7, 8, 6, 8, 6, 7
+enum Word_Type:uint16_t
+{
+    unknown,
+    Adjective,
+    Adverb,
+    Noun,
+    Verb,
+    Determiner,
+    Conjunction,
+    Preposition,
+    Interjection,
+    Pronoun
 };
 
-//store in row-wise
-struct Grid {
-	using value_type = uint16_t;
+uint16_t to_word_type(std::string_view str) {
+    for (uint16_t idx = 1; idx < WORD_T_STR_MAP.size();++idx) {
+        if (WORD_T_STR_MAP[idx] == str) {
+            return idx;
+        }
+    }
+    return Word_Type::unknown;
+}
 
-	value_type& operator[](size_t n);
-	const value_type& operator[](size_t n) const;
+std::string_view to_word_type_str(uint16_t t) {
+    if (t >= WORD_T_STR_MAP.size()) {
+        return WORD_T_STR_MAP[0];
+    }
+    return WORD_T_STR_MAP[t];
+}
 
-	value_type& operator()(size_t row, size_t col);
-	const value_type& operator()(size_t row, size_t col) const;
+struct Word {
 
-	value_type& as_sub(size_t sub_n, size_t n);
+    std::string str;
+    uint16_t typ;
+    uint16_t syllables;
+};
 
-	bool is_full();
+std::ostream& operator<<(std::ostream& os, const Word& w) {
+    return os << std::format("{:12} {:2} {}", to_word_type_str(w.typ), w.syllables, w.str);
+}
 
-	bool is_bad();
 
-	std::array<value_type, 81> data;
+std::ostream& operator<<(std::ostream& os, const std::vector<Word>& d) {
+    std::string buf;
+    auto inserter = std::back_inserter(buf);
+    for (size_t i = 0;i < d.size();i++) {
+        std::format_to(inserter, "{:3}. {:12} {:2} {}\n", i, to_word_type_str(d[i].typ), d[i].syllables, d[i].str);
+        os << buf;
+        buf.clear();
+    }
+    return os;
+}
+
+inline const Word NULLWORD{ "null", 0, 0 };
+
+struct Dict {
+    
+    const auto& str(size_t i) const {
+        return data[i].str;
+    }
+    const auto syllables(size_t i) const {
+        return data[i].syllables;
+    }
+    const auto typ(size_t i) const {
+        return data[i].typ;
+    }
+
+    std::vector<Word> data;
+};
+
+enum ErrorCode
+{
+    noerror,
+    genernal_error,
+    parse_fail_open_file,
+    parse_fail_unknow_type,
+    alg_invalid_first_idx,
+    alg_invalid_first_syl,
+    alg_unsolvable,
+    haiku_invalid_line_syllables,
+    haiku_invalid_length,
+    haiku_duplicate_word,
+    haiku_incomplete_compose
+};
+
+struct Parser {
+    Parser(std::string_view fname) :ifs{fname.data()}{}
+
+    int operator()(Dict& dict) {
+        nlohmann::json json;
+
+        if (!ifs.is_open()) {
+            return ErrorCode::parse_fail_open_file;
+        }
+        ifs >> json;
+
+        dict.data.reserve(json.size() + 1);
+        dict.data.push_back(NULLWORD);//index 0 reserve for null word
+
+        for (const auto& item : json) {
+            auto& w = dict.data.emplace_back();
+            w.typ = to_word_type(item.at("part_of_speech").get<std::string>());
+            if (w.typ == Word_Type::unknown) {
+                return ErrorCode::parse_fail_unknow_type;
+            }
+            w.str = item.at("word").get<std::string>();
+            w.syllables = item.at("syllables").get<uint16_t>();
+        }
+
+        return 0;
+    }
+    std::ifstream ifs;
+};
+
+constexpr size_t HAIKU_LINE_N = 3;
+constexpr std::array<size_t, HAIKU_LINE_N> HAIKU_LINE_SYl{ 5,7,5 };
+constexpr size_t HAIKU_MAX_SYl = *std::max_element(HAIKU_LINE_SYl.begin(), HAIKU_LINE_SYl.end());
+
+struct Haiku {
+    using Line = std::array<size_t, HAIKU_MAX_SYl>;
+
+    auto line_n() const {
+        return HAIKU_LINE_N;
+    }
+
+    auto max_syl() const {
+        return HAIKU_MAX_SYl;
+    }
+
+    size_t& first()  {
+        return lines[0][0];
+    }
+
+    size_t first() const {
+        return lines[0][0];
+    }
+
+    std::array<Line, HAIKU_LINE_N> lines;
+    std::array<size_t, HAIKU_LINE_N> line_syl{ HAIKU_LINE_SYl };
+};
+
+int validate(const Haiku& h, const Dict& d) {
+    
+    std::array<int, WORD_T_STR_MAP.size()> type_count{};
+    std::vector<size_t> words;
+    words.reserve(h.line_n() * h.max_syl());
+
+    for (size_t l = 0;l < h.lines.size(); ++l) {
+        uint16_t line_syllables = 0;
+        for (auto idx: h.lines[l]) {
+            if (idx == 0) {
+                break;
+            }
+            line_syllables += d.syllables(idx);
+            ++type_count[d.typ(idx)];
+            words.push_back(idx);
+        }
+        if (line_syllables != h.line_syl[l]) {
+            return ErrorCode::haiku_invalid_line_syllables;
+        }
+    }
+    if (words.size() < 1) {
+        return ErrorCode::haiku_invalid_length;
+    }
+    std::sort(words.begin(), words.end());
+
+    for (size_t i = 1;i < words.size(); ++i) {
+        if (words[i] == words[i - 1]) {
+            return ErrorCode::haiku_duplicate_word;
+        }
+    }
+    if (type_count[Word_Type::Adjective] == 0
+        || type_count[Word_Type::Adverb] == 0
+        || type_count[Word_Type::Noun] == 0
+        || type_count[Word_Type::Verb] == 0
+        ) {
+        return ErrorCode::haiku_incomplete_compose;
+    }
+    return 0;
+}
+
+std::ostream& print(std::ostream& os, const Haiku& h, const Dict& d) {
+    auto input = h.first();
+    os << std::format("Input: {} ({})\n\nOutput:\n", d.str(input), d.syllables(input));
+
+    for (auto& line:h.lines) {
+        uint16_t n = 0;
+        for (auto idx : line) {
+            if (idx == 0) {
+                break;
+            }
+            os << d.str(idx) << " ";
+            n += d.syllables(idx);
+        }
+        os << std::format("({})\n", n);
+    }
+    
+    return os;
+}
+
+struct Alg_Backtrack {
+   
+    Alg_Backtrack(Dict& dict) :m_dict{ dict } {}
+
+    int operator()(Haiku& h) {
+        size_t n = m_dict.data.size();
+        size_t first = h.first();
+        if (first == 0 || first >= n) {
+            return ErrorCode::alg_invalid_first_idx;
+        }
+        size_t first_syl = m_dict.syllables(first);
+        if (first_syl == 0 || first_syl > h.line_syl[0]) {
+            return ErrorCode::alg_invalid_first_syl;
+        }
+
+        //for reuse object
+        m_used.assign(n, false);
+        m_type_count.fill(0);
+
+        //init stage
+        m_used[first] = true;
+        ++m_type_count[m_dict.typ(first)];
+
+        if (solve(h, 0, 1, h.line_syl[0] - first_syl)) {
+            return 0;
+        }
+
+        return ErrorCode::alg_unsolvable;
+    }
+
+    bool complete() const {
+        return m_type_count[Word_Type::Adjective] > 0
+            && m_type_count[Word_Type::Adverb] > 0
+            && m_type_count[Word_Type::Noun] > 0
+            && m_type_count[Word_Type::Verb] > 0;
+    }
+
+    bool solve(Haiku& h, size_t l, size_t p, size_t remain_syl) {
+        if (remain_syl == 0) {
+            if (l + 1 == h.line_n()) {
+                return complete();
+            }
+            return solve(h, l + 1, 0, h.line_syl[l + 1]);
+        }
+        if (p >= h.max_syl()) {
+            return false;
+        }
+
+        for (size_t i = 1; i < m_dict.data.size(); ++i) {
+            size_t syl = m_dict.syllables(i);
+            if (m_used[i] || syl == 0 || syl > remain_syl) {
+                continue;
+            }
+            auto typ = m_dict.typ(i);
+
+            m_used[i] = true;
+            ++m_type_count[typ];
+            h.lines[l][p] = i;
+
+            if (solve(h, l, p + 1, remain_syl - syl)) {
+                return true;
+            }
+
+            //restore
+            h.lines[l][p] = 0;
+            --m_type_count[typ];
+            m_used[i] = false;
+        }
+        return false;
+    }
+
+    Dict& m_dict;
+    std::vector<bool> m_used;
+    std::array<int, WORD_T_STR_MAP.size()> m_type_count{};
 };
 
 
-bool is_ok(const Grid& in);
-bool is_ok(const Grid& in, size_t row, size_t col);
-bool is_path_ok(const Grid& in);
+int cmd(std::string_view idx_str, std::string_view shuffle_str) {
 
-void format_to(std::string& to, const Grid& in);
-void format_to_v2(std::string& to, const Grid& in);
+    size_t idx;
 
-struct Candidate_reduce {
-	/// @brief use bit represent for candidate instead of integer
-	struct Candidate {
-		using value_type = Grid::value_type;
-		Candidate();
-		Candidate(value_type v);
+    if (std::from_chars(idx_str.data(), idx_str.data() + idx_str.size(), idx).ec !=  std::errc{}) {
+        std::cerr << std::format("can't parse idx to size_t: {}\n", idx_str);
+        return 1;
+    }
 
-		operator value_type() const;
+    int shuffle;
 
-		size_t size() const;
-		void set_all();
-		void set(size_t n);
-		void clear(size_t n);
-		void del(value_type n);
-		void push(value_type n);
-		void unset(Candidate c);
-		value_type pop();
-		value_type peek(size_t pos) const;
-		value_type data;
-	};
-	struct Candidate_table {
-		Candidate& operator[](size_t n);
+    if (std::from_chars(shuffle_str.data(), shuffle_str.data() + shuffle_str.size(), shuffle).ec != std::errc{}) {
+        std::cerr << std::format("can't parse shuffle to int: {}\n", shuffle_str);
+        return 1;
+    }
 
-		const Candidate& operator[](size_t n) const;
+    Parser ps{ R"(in.json)" };
 
-		Candidate& operator()(size_t row, size_t col);
+    Dict dict{};
+    int err = ps(dict);
 
-		const Candidate& operator()(size_t row, size_t col) const;
+    if (err) {
+        std::cerr << std::format("parse error code={}\n", err);
+        return err;
+    }
 
-		size_t candidate_size() const;
-		bool has_size_1();
-		std::array<Candidate, 81> data;
-	};
+    if (shuffle) {
+        std::random_device rd;
+        std::mt19937 rng(rd());
+        std::shuffle(dict.data.begin() + 1, dict.data.end(), rng);
+    }
 
+    Haiku h{};
+    h.first() = idx;
 
+    Alg_Backtrack alg{ dict };
 
-	using locator_type = std::function<size_t(size_t, size_t)>;
+    err = alg(h);
+    if (err) {
+        std::cerr << std::format("resolve error code={}\n", err);
+        return err;
+    }
 
+    err = validate(h, dict);
 
-	/// @return 0 = error, if error mean there are multiple solution for this grid
-	int operator()(Grid& result);
+    if (err) {
+        std::cerr << std::format("invalid haiku output error code={}\n", err);
+        return err;
+    }
 
-	void refine_as(Candidate_table& ctb, const Grid& in, locator_type fn);
-	void refine_full(Candidate_table& ctb, const Grid& in);
-	void clear(Candidate_table& ctb, const  Grid& in);
-	void do_solve(Candidate_table& ctb, Grid& in);
+    print(std::cout, h, dict);
 
-};
+    std::cout << "\ndict:\n" << dict.data;
 
-std::ostream& operator<<(std::ostream& os, Candidate_reduce::Candidate m);
-
-std::ostream& operator<<(std::ostream& os, const Candidate_reduce::Candidate_table& tb);
-
-struct Backtrack {
-	Backtrack(std::vector<Grid>& all_result);
-	int operator()(Grid& result);
-
-	
-	bool do_solve(Grid& result);
-	bool is_ok(const Grid& in, size_t row, size_t col, Grid::value_type num);
-
-	std::vector<Grid>& m_all_result;
-};
-
-
-///https://godbolt.org/z/sxMeKT9o8
-int main() {
-	Grid result{};
-	result.data = in_board;
-
-	std::string print_buf;
-
-	format_to(print_buf, result);
-
-	std::cout << print_buf << "\n";
-
-
-	Candidate_reduce resol{};
-
-	int err = resol(result);
-
-	if (!err) {
-		print_buf.clear();
-		format_to(print_buf, result);
-		std::cerr << "only 1 solution possible\n";
-		std::cout << print_buf << "\n";
-		return 0;
-	}
-
-	std::vector<Grid> all_result;
-	Backtrack bt{ all_result };
-	bt(result);
-
-	std::cout << std::format("solution with no filter={}\n\n", all_result.size());
-
-	size_t solution_n = 0;
-	print_buf.clear();
-	for (auto& it: all_result) {
-		if (is_ok(it)) {
-			format_to_v2(print_buf, it);
-			print_buf += "\n";
-			solution_n++;
-		}
-	}
-	std::cout << std::format("solution with filter={}\n\n", solution_n);
-	std::cout << print_buf << "\n";
-
-	return 0;
+    return 0;
 }
 
+constexpr auto help_text = R"(usage:
+    <exetable name> [int:input index in dict (default: 1)] [int:shuffle dict (default: 0)]
+)";
 
-void format_to(std::string& to, const Grid& in) {
-	for (size_t i = 0; i < 9; ++i) {
-		std::format_to(std::back_inserter(to), "{} {} {} {} {} {} {} {} {}\n", in[i * 9], in[i * 9 + 1], in[i * 9 + 2], in[i * 9 + 3], in[i * 9 + 4], in[i * 9 + 5], in[i * 9 + 6], in[i * 9 + 7], in[i * 9 + 8]);
-	}
-}
-void format_to_v2(std::string& to, const Grid& in) {
-	for (size_t i = 0; i < 9; ++i) {
-		std::format_to(std::back_inserter(to), "{}{}{}{}{}{}{}{}{}\n", in[i * 9], in[i * 9 + 1], in[i * 9 + 2], in[i * 9 + 3], in[i * 9 + 4], in[i * 9 + 5], in[i * 9 + 6], in[i * 9 + 7], in[i * 9 + 8]);
-	}
-}
-
-Grid::value_type& Grid::operator[](size_t n)
-{
-	return data[n];
-}
-
-const Grid::value_type& Grid::operator[](size_t n) const
-{
-	return data[n];
-}
-
-const Grid::value_type& Grid::operator()(size_t row, size_t col) const
-{
-	return data[row * 9 + col];
-}
-
-Grid::value_type& Grid::as_sub(size_t sub_n, size_t n)
-{
-	return data[(27 * (sub_n / 3) + 3 * (sub_n % 3)) + (9 * (n / 3) + (n % 3))];
-}
-
-Grid::value_type& Grid::operator()(size_t row, size_t col)
-{
-	return data[row * 9 + col];
-}
-
-bool Grid::is_full()
-{
-	for (auto v : data) {
-		if (v == 0) {
-			return false;
-		}
-	}
-	return true;
-}
-
-bool Grid::is_bad()
-{
-	for (auto v : data) {
-		if (v > 9 || v < 0) {
-			return true;
-		}
-	}
-	return false;
-}
-
-bool is_ok(const Grid& in)
-{
-	for (size_t row = 0; row < 9; ++row) {
-		for (size_t col = 0; col < 9; ++col) {
-			if (in(row, col) == 0) {
-				continue;
-			}
-			if (!is_ok(in, row, col)) {
-				return false;
-			}
-		}
-	}
-	return is_path_ok(in);
-}
-
-bool is_ok(const Grid& in, size_t row, size_t col) {
-	auto num = in(row, col);
-	for (size_t n = 0; n < 9; ++n) {
-		if (n != col && in(row, n) == num) {
-			return false;
-		}
-	}
-
-	for (size_t n = 0; n < 9; ++n) {
-		if (n != row && in(n, col) == num) {
-			return false;
-		}
-	}
-
-	size_t start_row = row - row % 3, start_col = col - col % 3;
-	for (size_t n = 0; n < 3; ++n) {
-		for (size_t k = 0; k < 3; ++k) {
-			auto x = n + start_row;
-			auto y = k + start_col;
-			if (!(x == row && y == col) && in(x, y) == num)
-				return false;
-		}
-	}
-	return true;
-}
-
-
-bool is_path_ok(const Grid& in)
-{
-	for (size_t m = 0; m < 4; ++m) {
-		uint16_t sum = 0;
-		for (size_t n = 0; n < 4; ++n) {
-			auto row = in_path[m * 4 + n * 2];
-			auto col = in_path[m * 4 + n * 2 + 1];
-			auto v = in(row, col);
-			if (v == 0) {
-				sum = min_sum; //make valid and go next path
-				break;
-			}
-			sum += v;
-		}
-		if (sum < min_sum) {
-			return false;
-		}
-	}
-	return true;
-}
-
-Candidate_reduce::Candidate::Candidate() :data{ 0b1'1111'1111 }
-{
-}
-
-Candidate_reduce::Candidate::Candidate(Candidate_reduce::Candidate::value_type v) :data{ v }
-{
-}
-
-Candidate_reduce::Candidate::operator typename Candidate_reduce::Candidate::value_type() const
-{
-	return data;
-}
-
-size_t Candidate_reduce::Candidate::size() const
-{
-	return std::popcount(data);
-}
-
-void Candidate_reduce::Candidate::set_all()
-{
-	data = 0b1'1111'1111;
-}
-
-void Candidate_reduce::Candidate::set(size_t n)
-{
-	data |= 1 << n;
-}
-
-void Candidate_reduce::Candidate::clear(size_t n)
-{
-	data &= ~(1 << n);
-}
-
-void Candidate_reduce::Candidate::del(Candidate_reduce::Candidate::value_type n)
-{
-	data &= ~(1 << (n - 1));
-}
-
-void Candidate_reduce::Candidate::push(Candidate_reduce::Candidate::value_type n)
-{
-	data |= 1 << (n - 1);
-}
-
-void Candidate_reduce::Candidate::unset(Candidate_reduce::Candidate c)
-{
-	data &= ~c.data;
-}
-
-Candidate_reduce::Candidate::value_type Candidate_reduce::Candidate::pop()
-{
-	for (size_t i = 0, cur = 0; i < 9; ++i) {
-		value_type mask = 1 << i;
-		if ((data & mask) == mask) {
-			clear(i);
-			return i + 1;
-		}
-	}
-	return 0;
-}
-
-Candidate_reduce::Candidate::value_type Candidate_reduce::Candidate::peek(size_t pos) const
-{
-	for (size_t i = 0, cur = 0; i < 9; ++i) {
-		value_type mask = 1 << i;
-		if ((data & mask) == mask) {
-			if (cur == pos) {
-				return i + 1;
-			}
-			else {
-				++cur;
-			}
-		}
-	}
-	return 0;
-}
-
-Candidate_reduce::Candidate& Candidate_reduce::Candidate_table::operator[](size_t n)
-{
-	return data[n];
-}
-
-const Candidate_reduce::Candidate& Candidate_reduce::Candidate_table::operator[](size_t n) const
-{
-	return data[n];
-}
-
-Candidate_reduce::Candidate& Candidate_reduce::Candidate_table::operator()(size_t row, size_t col)
-{
-	return data[row * 9 + col];
-}
-
-const Candidate_reduce::Candidate& Candidate_reduce::Candidate_table::operator()(size_t row, size_t col) const
-{
-	return data[row * 9 + col];
-}
-
-size_t Candidate_reduce::Candidate_table::candidate_size() const
-{
-	size_t n{};
-	for (auto v : data) {
-		n += v.size();
-	}
-	return n;
-}
-
-bool Candidate_reduce::Candidate_table::has_size_1()
-{
-	for (auto v : data) {
-		if (v.size() == 1) {
-			return true;
-		}
-	}
-	return false;
-}
-
-int Candidate_reduce::operator()(Grid& result)
-{
-	Candidate_table ctb{};
-
-	refine_full(ctb, result);
-
-
-	while (ctb.has_size_1()) {
-		do_solve(ctb, result);
-		refine_full(ctb, result);
-	}
-
-
-	if (ctb.candidate_size() == 0) {
-		return  0;
-	}
-
-	return 1;
-}
-
-void Candidate_reduce::refine_as(Candidate_reduce::Candidate_table& out, const Grid& in, locator_type fn)
-{
-	for (size_t i = 0; i < 9; ++i) {
-		Candidate cd{ 0 };
-		for (size_t j = 0; j < 9; ++j) {
-			size_t n = fn(i, j);
-			if (in[n] != 0) {
-				cd.push(in[n]);
-			}
-		}
-		for (size_t j = 0; j < 9; ++j) {
-			out[fn(i, j)].unset(cd);
-		}
-	}
-}
-
-void Candidate_reduce::refine_full(Candidate_reduce::Candidate_table& ctb, const Grid& in)
-{
-	clear(ctb, in);
-	refine_as(ctb, in, [](size_t row, size_t col) { return row * 9 + col; });
-	refine_as(ctb, in, [](size_t col, size_t row) { return row * 9 + col; });
-	refine_as(ctb, in, [](size_t sub_n, size_t n) { return (27 * (sub_n / 3) + 3 * (sub_n % 3)) + (9 * (n / 3) + (n % 3)); });
-}
-
-void Candidate_reduce::clear(Candidate_reduce::Candidate_table& ctb, const Grid& in)
-{
-	for (size_t i = 0; i < 81; ++i) {
-		if (in[i] != 0) {
-			ctb[i] = 0;
-		}
-	}
-}
-
-void Candidate_reduce::do_solve(Candidate_reduce::Candidate_table& ctb, Grid& in)
-{
-	for (size_t i = 0; i < 81; ++i) {
-		if (ctb[i].size() == 1) {
-			in[i] = ctb[i].peek(0);
-		}
-	}
-}
-
-std::ostream& operator<<(std::ostream& os, Candidate_reduce::Candidate m)
-{
-	for (size_t i = 0; i < 9; ++i) {
-		Candidate_reduce::Candidate::value_type mask = 1 << i;
-		if ((m.data & mask) == mask) {
-			os << (i + 1);
-		}
-		else {
-			os << "_";
-		}
-	}
-	return os;
-}
-
-std::ostream& operator<<(std::ostream& os, const Candidate_reduce::Candidate_table& tb)
-{
-	for (size_t i = 0; i < 81; ++i) {
-		auto pos = i + 1;
-		os << tb[i] << ' ';
-		if (pos % 3 == 0) {
-			os << "  ";
-		}
-		if (pos % 9 == 0) {
-			os << '\n';
-		}
-		if (pos % 27 == 0) {
-			os << '\n';
-		}
-	}
-	return os;
-}
-
-Backtrack::Backtrack(std::vector<Grid>& all_result) :m_all_result{ all_result }
-{
-}
-
-int Backtrack::operator()(Grid& result) {
-	if (do_solve(result)) {
-		return 0;
-	}
-	return 1;
-}
-
-bool Backtrack::do_solve(Grid& result)
-{
-	size_t row, col;
-
-	for (row = 0; row < 9; ++row) {
-		for (col = 0; col < 9; ++col) {
-			if (result(row, col) == 0) {
-				goto solve;
-			}
-		}
-	}
-	m_all_result.push_back(result);
-	return false; //nothing to solve
-solve:
-
-	for (Grid::value_type num = 1; num <= 9; ++num) {
-		if (is_ok(result, row, col, num)) {
-			result(row, col) = num;
-			if (do_solve(result)) {
-				return true;
-			}
-
-			result(row, col) = 0; // Backtrack
-		}
-	}
-	return false; //trigger Backtrack
-}
-
-
-
-
-
-bool Backtrack::is_ok(const Grid& in, size_t row, size_t col, Grid::value_type num)
-{
-	for (size_t n = 0; n < 9; ++n) {
-		if (in(row, n) == num) {
-			return false;
-		}
-	}
-
-	for (size_t n = 0; n < 9; ++n) {
-		if (in(n, col) == num) {
-			return false;
-		}
-	}
-
-	size_t start_row = row - row % 3, start_col = col - col % 3;
-	for (size_t n = 0; n < 3; ++n)
-		for (size_t k = 0; k < 3; ++k)
-			if (in(n + start_row, k + start_col) == num)
-				return false;
-	return true;
+int main(int argc, const char** argv) {
+    switch(argc){
+    case 1:
+        return cmd("1", "0");
+    case 2:
+        return cmd(argv[1], "0");
+    case 3:
+        return cmd(argv[1], argv[2]);
+    default:
+        std::cerr << std::format("invalid arguments\n====================\n{}", help_text);
+        return 1;
+    }
 }
