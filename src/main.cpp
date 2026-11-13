@@ -25,7 +25,7 @@ constexpr std::array WORD_T_STR_MAP{
     "Pronoun"sv
 };
 
-enum Word_Type:uint16_t
+enum Word_Type:uint16_t //word type must have same value as index in WORD_T_STR_MAP
 {
     unknown,
     Adjective,
@@ -56,27 +56,10 @@ std::string_view to_word_type_str(uint16_t t) {
 }
 
 struct Word {
-
     std::string str;
     uint16_t typ;
     uint16_t syllables;
 };
-
-std::ostream& operator<<(std::ostream& os, const Word& w) {
-    return os << std::format("{:12} {:2} {}", to_word_type_str(w.typ), w.syllables, w.str);
-}
-
-
-std::ostream& operator<<(std::ostream& os, const std::vector<Word>& d) {
-    std::string buf;
-    auto inserter = std::back_inserter(buf);
-    for (size_t i = 0;i < d.size();i++) {
-        std::format_to(inserter, "{:3}. {:12} {:2} {}\n", i, to_word_type_str(d[i].typ), d[i].syllables, d[i].str);
-        os << buf;
-        buf.clear();
-    }
-    return os;
-}
 
 inline const Word NULLWORD{ "null", 0, 0 };
 
@@ -85,15 +68,26 @@ struct Dict {
     const auto& str(size_t i) const {
         return data[i].str;
     }
-    const auto syllables(size_t i) const {
+    auto syllables(size_t i) const {
         return data[i].syllables;
     }
-    const auto typ(size_t i) const {
+    auto typ(size_t i) const {
         return data[i].typ;
     }
 
     std::vector<Word> data;
 };
+
+std::ostream& operator<<(std::ostream& os, const Dict& d) {
+    std::string buf;
+    auto inserter = std::back_inserter(buf);
+    for (size_t i = 0; i < d.data.size(); i++) {
+        std::format_to(inserter, "{:3}. {:12} {:2} {}\n", i, to_word_type_str(d.typ(i)), d.syllables(i), d.str(i));
+        os << buf;
+        buf.clear();
+    }
+    return os;
+}
 
 enum ErrorCode
 {
@@ -119,7 +113,7 @@ struct Parser {
         if (!ifs.is_open()) {
             return ErrorCode::parse_fail_open_file;
         }
-        ifs >> json;
+        ifs >> json; //not sure that do i need handle some error here. 
 
         dict.data.reserve(json.size() + 1);
         dict.data.push_back(NULLWORD);//index 0 reserve for null word
@@ -143,8 +137,8 @@ constexpr size_t HAIKU_LINE_N = 3;
 constexpr std::array<size_t, HAIKU_LINE_N> HAIKU_LINE_SYl{ 5,7,5 };
 constexpr size_t HAIKU_MAX_SYl = *std::max_element(HAIKU_LINE_SYl.begin(), HAIKU_LINE_SYl.end());
 
-struct Haiku {
-    using Line = std::array<size_t, HAIKU_MAX_SYl>;
+struct Haiku { 
+    using Line = std::array<size_t, HAIKU_MAX_SYl>; // store index of word in dict for easier to process, use 0 (NULLWORD in dict) for unsolve or line break.
 
     auto line_n() const {
         return HAIKU_LINE_N;
@@ -166,6 +160,12 @@ struct Haiku {
     std::array<size_t, HAIKU_LINE_N> line_syl{ HAIKU_LINE_SYl };
 };
 
+/// @brief validate following the bussiness rules 
+/// - syllables for each line
+/// - no repeat word
+/// - Adjective, Adverb, Noun, Verb in Haiku
+/// and the logical rule
+/// - word number in Haiku
 int validate(const Haiku& h, const Dict& d) {
     
     std::array<int, WORD_T_STR_MAP.size()> type_count{};
@@ -208,6 +208,7 @@ int validate(const Haiku& h, const Dict& d) {
 
 std::ostream& print(std::ostream& os, const Haiku& h, const Dict& d) {
     auto input = h.first();
+
     os << std::format("Input: {} ({})\n\nOutput:\n", d.str(input), d.syllables(input));
 
     for (auto& line:h.lines) {
@@ -231,7 +232,8 @@ struct Alg_Backtrack {
 
     int operator()(Haiku& h) {
         size_t n = m_dict.data.size();
-        size_t first = h.first();
+        size_t first = h.first();//input is first value
+
         if (first == 0 || first >= n) {
             return ErrorCode::alg_invalid_first_idx;
         }
@@ -263,23 +265,26 @@ struct Alg_Backtrack {
     }
 
     bool solve(Haiku& h, size_t l, size_t p, size_t remain_syl) {
-        if (remain_syl == 0) {
-            if (l + 1 == h.line_n()) {
-                return complete();
+        if (remain_syl == 0) { //current line is complete
+            auto next_l = l + 1;
+            if (next_l == h.line_n()) { 
+                return complete();//all lines is complete check for types in Haiku
             }
-            return solve(h, l + 1, 0, h.line_syl[l + 1]);
+            return solve(h, next_l, 0, h.line_syl[next_l]); //go solve for next line
         }
-        if (p >= h.max_syl()) {
-            return false;
+
+        if (p >= h.max_syl()) { //number of words in line should never over max syllables.
+            return false; //should never reach here because there is no word with 0 syllable in this world.
         }
 
         for (size_t i = 1; i < m_dict.data.size(); ++i) {
             size_t syl = m_dict.syllables(i);
-            if (m_used[i] || syl == 0 || syl > remain_syl) {
+            if (m_used[i] || syl == 0 || syl > remain_syl) { //skip invalid word
                 continue;
             }
             auto typ = m_dict.typ(i);
 
+            //try solove by this word
             m_used[i] = true;
             ++m_type_count[typ];
             h.lines[l][p] = i;
@@ -288,12 +293,12 @@ struct Alg_Backtrack {
                 return true;
             }
 
-            //restore
+            //backtrace is trigger restore to previous stage
             h.lines[l][p] = 0;
             --m_type_count[typ];
             m_used[i] = false;
         }
-        return false;
+        return false; //trigger backtrace
     }
 
     Dict& m_dict;
@@ -352,9 +357,7 @@ int cmd(std::string_view idx_str, std::string_view shuffle_str) {
         return err;
     }
 
-    print(std::cout, h, dict);
-
-    std::cout << "\ndict:\n" << dict.data;
+    print(std::cout, h, dict) <<  "\ndict:\n" << dict;
 
     return 0;
 }
